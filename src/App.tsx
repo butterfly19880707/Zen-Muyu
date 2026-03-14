@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform, useAnimation } from 'motion/react';
-import { Play, Pause, Settings, Volume2, VolumeX, Info, History, Hand } from 'lucide-react';
+import { Play, Pause, Settings, Volume2, VolumeX, Info, History, Hand, Book, X, RefreshCw, Loader2, Music, Minimize2, Maximize2 } from 'lucide-react';
+import { scriptures, Scripture } from './data/scriptures';
+import { GoogleGenAI, Modality } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // --- Audio Synthesis ---
 const createMuyuSound = (audioCtx: AudioContext) => {
@@ -58,6 +62,10 @@ export default function App() {
   const [merit, setMerit] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [isLibraryMinimized, setIsLibraryMinimized] = useState(false);
+  const [selectedScripture, setSelectedScripture] = useState<Scripture | null>(null);
+  const [isTtsLoading, setIsTtsLoading] = useState(false);
   const [meritPopups, setMeritPopups] = useState<{ id: number }[]>([]);
   
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -103,6 +111,61 @@ export default function App() {
   const removePopup = useCallback((id: number) => {
     setMeritPopups(prev => prev.filter(p => p.id !== id));
   }, []);
+
+  const playScriptureAudio = async (scripture: Scripture) => {
+    if (isTtsLoading) return;
+    setIsTtsLoading(true);
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: `Please read this scripture clearly and solemnly: ${scripture.title}. ${scripture.content}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Kore' }, // 'Kore' is a calm, deep voice
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const binaryString = atob(base64Audio);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        // Gemini TTS returns 16-bit PCM at 24000Hz
+        const pcmData = new Int16Array(bytes.buffer);
+        
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        const ctx = audioCtxRef.current;
+        
+        const audioBuffer = ctx.createBuffer(1, pcmData.length, 24000);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        // Convert Int16 to Float32
+        for (let i = 0; i < pcmData.length; i++) {
+          channelData[i] = pcmData[i] / 32768.0;
+        }
+        
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        source.start();
+      }
+    } catch (error) {
+      console.error("TTS Error:", error);
+    } finally {
+      setIsTtsLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!isPlaying) {
@@ -178,6 +241,13 @@ export default function App() {
             title={isMuted ? "Unmute" : "Mute"}
           >
             {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+          </button>
+          <button 
+            onClick={() => setShowLibrary(true)}
+            className="p-2 rounded-full hover:bg-[#e8e8df] transition-colors text-[#5A5A40]"
+            title="Library"
+          >
+            <Book size={20} />
           </button>
           <button 
             onClick={() => setShowSettings(!showSettings)}
@@ -369,6 +439,130 @@ export default function App() {
                 Return to Zen
               </button>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Library Modal */}
+      <AnimatePresence>
+        {showLibrary && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className={`fixed z-[100] flex p-4 transition-all duration-500 ${
+              isLibraryMinimized 
+                ? "bottom-4 left-4 w-72 h-auto pointer-events-none" 
+                : "inset-0 items-center justify-center bg-black/40 backdrop-blur-md"
+            }`}
+            onClick={() => {
+              if (!isLibraryMinimized) {
+                setShowLibrary(false);
+                setSelectedScripture(null);
+              }
+            }}
+          >
+            <motion.div 
+              layout
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className={`bg-[#fdfcf9] rounded-[2rem] shadow-2xl overflow-hidden flex flex-col border border-[#5A5A40]/10 pointer-events-auto transition-all duration-500 ${
+                isLibraryMinimized ? "w-full" : "w-full max-w-2xl max-h-[80vh]"
+              }`}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className={`p-4 border-b border-[#5A5A40]/10 flex justify-between items-center bg-[#f5f5f0] ${isLibraryMinimized ? "p-3" : "p-6"}`}>
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <Book size={isLibraryMinimized ? 18 : 24} className="text-[#5A5A40] shrink-0" />
+                  <h2 className={`serif text-[#3d3d2e] truncate ${isLibraryMinimized ? "text-sm" : "text-2xl"}`}>
+                    {selectedScripture ? selectedScripture.title : 'Scripture Library'}
+                  </h2>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {selectedScripture && (
+                    <button
+                      onClick={() => playScriptureAudio(selectedScripture)}
+                      disabled={isTtsLoading}
+                      className={`flex items-center justify-center bg-[#5A5A40] text-white rounded-full hover:bg-[#4a4a35] transition-all disabled:opacity-50 ${
+                        isLibraryMinimized ? "w-8 h-8" : "gap-2 px-4 py-2 text-xs uppercase tracking-widest"
+                      }`}
+                      title={isLibraryMinimized ? "Listen" : ""}
+                    >
+                      {isTtsLoading ? (
+                        <Loader2 size={isLibraryMinimized ? 14 : 14} className="animate-spin" />
+                      ) : (
+                        <Music size={isLibraryMinimized ? 14 : 14} />
+                      )}
+                      {!isLibraryMinimized && (isTtsLoading ? 'Generating...' : 'Listen')}
+                    </button>
+                  )}
+                  
+                  <button 
+                    onClick={() => setIsLibraryMinimized(!isLibraryMinimized)}
+                    className="text-[#8a8a7a] hover:text-[#3d3d2e] p-2 rounded-full hover:bg-black/5 transition-colors"
+                    title={isLibraryMinimized ? "Maximize" : "Minimize"}
+                  >
+                    {isLibraryMinimized ? <Maximize2 size={isLibraryMinimized ? 16 : 20} /> : <Minimize2 size={20} />}
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      setShowLibrary(false);
+                      setSelectedScripture(null);
+                      setIsLibraryMinimized(false);
+                    }} 
+                    className="text-[#8a8a7a] hover:text-[#3d3d2e] p-2 rounded-full hover:bg-black/5 transition-colors"
+                  >
+                    <X size={isLibraryMinimized ? 16 : 24} />
+                  </button>
+                </div>
+              </div>
+
+              {!isLibraryMinimized && (
+                <>
+                  <div className="flex-1 overflow-y-auto p-8">
+                    {!selectedScripture ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {scriptures.map((scripture) => (
+                          <motion.div
+                            key={scripture.id}
+                            whileHover={{ y: -4, shadow: '0 10px 20px rgba(0,0,0,0.05)' }}
+                            onClick={() => setSelectedScripture(scripture)}
+                            className="p-6 rounded-2xl bg-white border border-[#5A5A40]/10 cursor-pointer transition-all hover:border-[#5A5A40]/30"
+                          >
+                            <h3 className="serif text-xl text-[#3d3d2e] mb-2">{scripture.title}</h3>
+                            <p className="text-sm text-[#8a8a7a] line-clamp-2">{scripture.description}</p>
+                            <div className="mt-4 text-[10px] uppercase tracking-widest text-[#5A5A40] font-bold">Read Now →</div>
+                          </motion.div>
+                        ))}
+                      </div>
+                    ) : (
+                      <motion.div 
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="prose prose-stone max-w-none"
+                      >
+                        <div className="whitespace-pre-wrap font-serif text-lg leading-relaxed text-[#3d3d2e] text-center">
+                          {selectedScripture.content}
+                        </div>
+                      </motion.div>
+                    )}
+                  </div>
+                  
+                  {selectedScripture && (
+                    <div className="p-4 bg-[#f5f5f0] border-t border-[#5A5A40]/10 flex justify-center">
+                      <button 
+                        onClick={() => setSelectedScripture(null)}
+                        className="text-xs uppercase tracking-[0.2em] text-[#5A5A40] hover:underline"
+                      >
+                        Back to Library
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
